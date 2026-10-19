@@ -10,6 +10,17 @@ pub trait TokenWhitelistInterface {
 
     fn is_whitelisted(env: Env, token: Address) -> bool;
 
+    /// Create-time check: rejects deprecated tokens. Consuming contracts
+    /// should use this when opening new positions and keep using
+    /// `is_token_allowed` for existing ones.
+    fn is_token_allowed_for_new(env: Env, token: Address) -> bool;
+
+    fn deprecate_token(env: Env, admin: Address, token: Address, sunset_ledger: u32);
+
+    fn undeprecate_token(env: Env, admin: Address, token: Address);
+
+    fn get_token_deprecation(env: Env, token: Address) -> Option<crate::TokenDeprecation>;
+
     fn is_token_allowed_for_contract(env: Env, contract_id: Address, token: Address) -> bool;
 
     fn set_contract_token(

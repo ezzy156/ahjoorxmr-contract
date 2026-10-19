@@ -147,3 +147,37 @@ fn test_capture_rejected_after_customer_cancel() {
     let result = s.client.try_capture_payment(&merchant, &pid);
     assert!(result.is_err());
 }
+
+#[test]
+fn test_get_customer_refunds_pagination_and_cap() {
+    let s = setup();
+    let customer = Address::generate(&s.env);
+    let merchant = Address::generate(&s.env);
+    s.tac.mint(&customer, &10_000);
+    approve(&s, &customer, 10_000);
+
+    s.env.ledger().set_sequence_number(100);
+    let mut ids = soroban_sdk::Vec::new(&s.env);
+    for _ in 0..3 {
+        let pid = s
+            .client
+            .authorize_payment(&merchant, &customer, &s.token_addr, &300, &200u64);
+        s.client.cancel_payment(&customer, &pid);
+        ids.push_back(pid);
+    }
+
+    // Index includes withdrawn (customer-cancelled) requests.
+    let page = s.client.get_customer_refunds(&customer, &0u32, &10u32);
+    assert_eq!(page.len(), 3);
+    assert_eq!(page.get(0).unwrap(), ids.get(0).unwrap());
+    assert_eq!(page.get(2).unwrap(), ids.get(2).unwrap());
+
+    // Pagination window.
+    let page = s.client.get_customer_refunds(&customer, &1u32, &1u32);
+    assert_eq!(page.len(), 1);
+    assert_eq!(page.get(0).unwrap(), ids.get(1).unwrap());
+
+    // Page size is capped.
+    let capped = s.client.get_customer_refunds(&customer, &0u32, &u32::MAX);
+    assert!(capped.len() <= 50);
+}

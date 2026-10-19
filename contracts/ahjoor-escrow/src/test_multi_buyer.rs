@@ -177,3 +177,126 @@ fn test_get_multi_buyer_details_for_non_multi_buyer_escrow_is_empty() {
     assert_eq!(shares.len(), 0);
     assert_eq!(approvals.len(), 0);
 }
+
+#[test]
+fn test_get_escrows_by_buyer_indexes_multi_buyer_escrow() {
+    let (env, client, _admin, token_addr, token_client, token_admin_client) = setup();
+    let buyer1 = Address::generate(&env);
+    let buyer2 = Address::generate(&env);
+    let seller = Address::generate(&env);
+    let arbiter = Address::generate(&env);
+
+    token_admin_client.mint(&buyer1, &1_000);
+    token_admin_client.mint(&buyer2, &1_000);
+    token_client.approve(&buyer1, &client.address, &300, &(env.ledger().sequence() + 10_000));
+    token_client.approve(&buyer2, &client.address, &700, &(env.ledger().sequence() + 10_000));
+
+    let mut buyers: Vec<(Address, i128)> = Vec::new(&env);
+    buyers.push_back((buyer1.clone(), 300));
+    buyers.push_back((buyer2.clone(), 700));
+
+    let deadline = env.ledger().timestamp() + 1_000;
+    let escrow_id = client.create_multi_buyer_escrow(
+        &buyers,
+        &seller,
+        &arbiter,
+        &token_addr,
+        &deadline,
+    );
+
+    // Both buyers are indexed for the same escrow.
+    let by_buyer1 = client.get_escrows_by_buyer(&buyer1, &0u32, &10u32);
+    assert_eq!(by_buyer1.len(), 1);
+    assert_eq!(by_buyer1.get(0).unwrap(), escrow_id);
+
+    let by_buyer2 = client.get_escrows_by_buyer(&buyer2, &0u32, &10u32);
+    assert_eq!(by_buyer2.len(), 1);
+    assert_eq!(by_buyer2.get(0).unwrap(), escrow_id);
+
+    // Seller index also records the escrow.
+    let by_seller = client.get_escrows_by_seller(&seller, &0u32, &10u32);
+    assert_eq!(by_seller.len(), 1);
+    assert_eq!(by_seller.get(0).unwrap(), escrow_id);
+}
+
+#[test]
+fn test_get_escrows_by_buyer_pagination_and_cap() {
+    let (env, client, _admin, token_addr, token_client, token_admin_client) = setup();
+    let buyer = Address::generate(&env);
+    let seller = Address::generate(&env);
+    let arbiter = Address::generate(&env);
+
+    token_admin_client.mint(&buyer, &10_000);
+    token_client.approve(&buyer, &client.address, &10_000, &(env.ledger().sequence() + 10_000));
+
+    let deadline = env.ledger().timestamp() + 1_000;
+    let mut ids: Vec<u64> = Vec::new(&env);
+    for _ in 0..3 {
+        let id = client.create_escrow(
+            &buyer,
+            &seller,
+            &arbiter,
+            &1_000,
+            &token_addr,
+            &deadline,
+            &None,
+            &Vec::new(&env),
+            &false,
+            &0u32,
+        );
+        ids.push_back(id);
+    }
+
+    // Full page returns all three in creation order.
+    let all = client.get_escrows_by_buyer(&buyer, &0u32, &10u32);
+    assert_eq!(all.len(), 3);
+    assert_eq!(all.get(0).unwrap(), ids.get(0).unwrap());
+    assert_eq!(all.get(2).unwrap(), ids.get(2).unwrap());
+
+    // Pagination window.
+    let page = client.get_escrows_by_buyer(&buyer, &1u32, &1u32);
+    assert_eq!(page.len(), 1);
+    assert_eq!(page.get(0).unwrap(), ids.get(1).unwrap());
+
+    // Start beyond the end yields an empty page.
+    let empty = client.get_escrows_by_buyer(&buyer, &99u32, &10u32);
+    assert_eq!(empty.len(), 0);
+}
+
+#[test]
+fn test_get_escrows_by_seller_updates_after_role_transfer() {
+    let (env, client, _admin, token_addr, token_client, token_admin_client) = setup();
+    let buyer = Address::generate(&env);
+    let seller = Address::generate(&env);
+    let new_seller = Address::generate(&env);
+    let arbiter = Address::generate(&env);
+
+    token_admin_client.mint(&buyer, &1_000);
+    token_client.approve(&buyer, &client.address, &1_000, &(env.ledger().sequence() + 10_000));
+
+    let deadline = env.ledger().timestamp() + 1_000;
+    let escrow_id = client.create_escrow(
+        &buyer,
+        &seller,
+        &arbiter,
+        &1_000,
+        &token_addr,
+        &deadline,
+        &None,
+        &Vec::new(&env),
+        &false,
+        &0u32,
+    );
+
+    // Initially indexed under the original seller only.
+    assert_eq!(client.get_escrows_by_seller(&seller, &0u32, &10u32).len(), 1);
+    assert_eq!(client.get_escrows_by_seller(&new_seller, &0u32, &10u32).len(), 0);
+
+    // Transfer the seller role; index must move to the new seller.
+    client.transfer_seller_role(&seller, &escrow_id, &new_seller);
+
+    assert_eq!(client.get_escrows_by_seller(&seller, &0u32, &10u32).len(), 0);
+    let moved = client.get_escrows_by_seller(&new_seller, &0u32, &10u32);
+    assert_eq!(moved.len(), 1);
+    assert_eq!(moved.get(0).unwrap(), escrow_id);
+}

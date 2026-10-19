@@ -96,7 +96,7 @@ fn test_voluntary_exit_notice_period_flow() {
     env.ledger().set_sequence_number(120);
     client.finalize_voluntary_exit(&member);
 
-    let exited = client.get_exited_members();
+    let exited = client.get_exited_members(&0u32, &10u32);
     assert!(exited.contains(&member));
     assert!(client.get_voluntary_exit_request(&member).is_none());
 }
@@ -130,7 +130,7 @@ fn test_zero_notice_immediate_exit() {
 
     // Immediate removal — no pending request
     assert!(client.get_voluntary_exit_request(&member).is_none());
-    assert!(client.get_exited_members().contains(&member));
+    assert!(client.get_exited_members(&0u32, &10u32).contains(&member));
 }
 
 #[test]
@@ -147,4 +147,45 @@ fn test_member_liable_during_notice_window() {
     let (paid, remaining) = client.get_member_contribution_status(&member);
     assert_eq!(paid, 100);
     assert_eq!(remaining, 0);
+}
+
+fn seed_exited_members(env: &Env, client: &AhjoorContractClient<'_>) -> Vec<Address> {
+    let mut seeded = Vec::new(env);
+    for _ in 0..7 {
+        seeded.push_back(Address::generate(env));
+    }
+    let stored = seeded.clone();
+    env.as_contract(&client.address, || {
+        env.storage()
+            .instance()
+            .set(&DataKey::ExitedMembers, &stored);
+    });
+    seeded
+}
+
+#[test]
+fn test_get_exited_members_pagination_middle_page() {
+    let (env, client, _admin, _members, _token, _tac) = setup_group(0);
+    let seeded = seed_exited_members(&env, &client);
+
+    let page = client.get_exited_members(&2u32, &3u32);
+    assert_eq!(page.len(), 3);
+    assert_eq!(page.get(0).unwrap(), seeded.get(2).unwrap());
+    assert_eq!(page.get(1).unwrap(), seeded.get(3).unwrap());
+    assert_eq!(page.get(2).unwrap(), seeded.get(4).unwrap());
+}
+
+#[test]
+fn test_get_exited_members_pagination_runs_past_end() {
+    let (env, client, _admin, _members, _token, _tac) = setup_group(0);
+    let _seeded = seed_exited_members(&env, &client);
+
+    let partial = client.get_exited_members(&5u32, &4u32);
+    assert_eq!(partial.len(), 2);
+
+    let empty = client.get_exited_members(&7u32, &4u32);
+    assert_eq!(empty.len(), 0);
+
+    let zero_limit = client.get_exited_members(&0u32, &0u32);
+    assert_eq!(zero_limit.len(), 0);
 }

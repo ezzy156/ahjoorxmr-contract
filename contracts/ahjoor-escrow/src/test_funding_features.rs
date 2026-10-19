@@ -189,11 +189,63 @@ fn test_child_escrows_register_under_parent() {
         &features(&s.env, None, Some(parent), None, None),
     );
 
-    let children = s.client.get_child_escrows(&parent);
+    let children = s.client.get_child_escrows(&parent, &0, &10);
     assert_eq!(children.len(), 2);
     assert_eq!(children.get(0).unwrap(), child1);
     assert_eq!(children.get(1).unwrap(), child2);
     assert_eq!(s.client.get_project_status(&parent), ProjectStatus::InProgress);
+}
+
+#[test]
+fn test_child_escrows_pagination() {
+    let s = setup();
+    let buyer = Address::generate(&s.env);
+    let seller = Address::generate(&s.env);
+    let arbiter = Address::generate(&s.env);
+    s.token_admin.mint(&buyer, &5_000);
+
+    let deadline = s.env.ledger().timestamp() + 1_000;
+    let parent = s.client.create_escrow(
+        &buyer,
+        &seller,
+        &arbiter,
+        &100,
+        &s.token_addr,
+        &deadline,
+        &None,
+        &Vec::new(&s.env),
+        &false,
+        &0u32,
+    );
+
+    let mut ids = Vec::new(&s.env);
+    for _ in 0..3 {
+        let child = s.client.create_escrow_with_features(
+            &buyer,
+            &seller,
+            &arbiter,
+            &100,
+            &s.token_addr,
+            &deadline,
+            &None,
+            &features(&s.env, None, Some(parent), None, None),
+        );
+        ids.push_back(child);
+    }
+
+    let first = s.client.get_child_escrows(&parent, &0, &2);
+    assert_eq!(first.len(), 2);
+    assert_eq!(first.get(0).unwrap(), ids.get(0).unwrap());
+    assert_eq!(first.get(1).unwrap(), ids.get(1).unwrap());
+
+    let second = s.client.get_child_escrows(&parent, &2, &2);
+    assert_eq!(second.len(), 1);
+    assert_eq!(second.get(0).unwrap(), ids.get(2).unwrap());
+
+    assert_eq!(s.client.get_child_escrows(&parent, &3, &2).len(), 0);
+    assert_eq!(s.client.get_child_escrows(&parent, &0, &0).len(), 0);
+    assert_eq!(s.client.get_child_escrows(&parent, &1, &u32::MAX).len(), 2);
+    assert_eq!(s.client.get_child_escrows(&999, &0, &10).len(), 0);
 }
 
 #[test]

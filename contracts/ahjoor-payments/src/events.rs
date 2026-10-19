@@ -773,6 +773,38 @@ pub fn emit_fee_collected(
     .publish(e);
 }
 
+/// #980: Event: multi-payee split payment created.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct SplitPaymentCreated {
+    pub payment_id: u32,
+    pub customer: Address,
+    pub amount: i128,
+    pub payee_count: u32,
+}
+
+pub fn emit_split_payment_created(
+    e: &Env,
+    payment_id: u32,
+    customer: Address,
+    amount: i128,
+    payee_count: u32,
+) {
+    SplitPaymentCreated { payment_id, customer, amount, payee_count }.publish(e);
+}
+
+/// #980: Event: a refund on a split payment was reversed across its payees.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct SplitPaymentRefunded {
+    pub payment_id: u32,
+    pub refund_amount: i128,
+}
+
+pub fn emit_split_payment_refunded(e: &Env, payment_id: u32, refund_amount: i128) {
+    SplitPaymentRefunded { payment_id, refund_amount }.publish(e);
+}
+
 pub fn emit_payment_split_completed(e: &Env, payment_id: u32, splits: Vec<SplitTransfer>) {
     PaymentSplitCompleted { payment_id, splits }.publish(e);
 }
@@ -2104,4 +2136,52 @@ pub fn emit_tip_subscription_cancelled(e: &Env, subscription_id: u32, customer: 
         (Symbol::new(e, "TipSubCancelled"),),
         (subscription_id, customer),
     );
+}
+
+/// #982: Merchant accepted token list updated
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct MerchantAcceptedTokensUpdated {
+    pub merchant: Address,
+    pub tokens: Vec<Address>,
+}
+
+pub fn emit_merchant_accepted_tokens_updated(e: &Env, merchant: Address, tokens: Vec<Address>) {
+    MerchantAcceptedTokensUpdated { merchant, tokens }.publish(e);
+}
+
+/// #981: Payout address change requested
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct PayoutAddressChangeRequested {
+    pub merchant: Address,
+    pub new_payout: Address,
+    pub effective_ledger: u32,
+}
+
+pub fn emit_payout_address_change_requested(e: &Env, merchant: Address, new_payout: Address, effective_ledger: u32) {
+    PayoutAddressChangeRequested { merchant, new_payout, effective_ledger }.publish(e);
+}
+
+/// #981: Payout address change cancelled
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct PayoutAddressChangeCancelled {
+    pub merchant: Address,
+}
+
+pub fn emit_payout_address_change_cancelled(e: &Env, merchant: Address) {
+    PayoutAddressChangeCancelled { merchant }.publish(e);
+}
+
+/// #981: Payout address change applied
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct PayoutAddressChangeApplied {
+    pub merchant: Address,
+    pub new_payout: Address,
+}
+
+pub fn emit_payout_address_change_applied(e: &Env, merchant: Address, new_payout: Address) {
+    PayoutAddressChangeApplied { merchant, new_payout }.publish(e);
 }

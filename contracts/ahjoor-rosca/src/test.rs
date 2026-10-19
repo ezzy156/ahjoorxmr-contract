@@ -2548,7 +2548,7 @@ fn test_admin_approves_exit_penalty_applied() {
     assert_eq!(info.total_rounds, 3); // PayoutOrder remains at 3 to keep schedule sync
 
     // u1 appears in exited members
-    let exited = client.get_exited_members();
+    let exited = client.get_exited_members(&0u32, &10u32);
     assert!(exited.contains(&u1));
 
     // Exit request is cleared
@@ -2588,7 +2588,7 @@ fn test_admin_rejects_exit_request() {
     assert!(info.members.contains(&u1));
 
     // u1 is NOT in exited members
-    assert!(!client.get_exited_members().contains(&u1));
+    assert!(!client.get_exited_members(&0u32, &10u32).contains(&u1));
 }
 
 // ---------------------------------------------------------------

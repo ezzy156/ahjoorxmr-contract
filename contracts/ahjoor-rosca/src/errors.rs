@@ -239,4 +239,75 @@ pub enum ExtError2 {
     // ── Group Cloning ─────────────────────────────────────────────────────────
     /// The source contract address provided for cloning is invalid (same as this contract).
     CloneSourceInvalid = 133,
+    // ── Payout Beneficiary Nomination ─────────────────────────────────────────
+    /// Beneficiary changes are locked while the member's payout round is in progress.
+    BeneficiaryLocked = 134,
+    /// The beneficiary address is invalid (e.g. the contract itself).
+    InvalidBeneficiary = 135,
+    // ── Group Charter ─────────────────────────────────────────────────────────
+    /// No charter has been set for this group.
+    CharterNotSet = 136,
+    /// The acknowledged version does not match the current charter version.
+    CharterVersionMismatch = 137,
+    /// The member has not acknowledged the current charter version.
+    CharterNotAcknowledged = 138,
+    // ── Membership Succession ─────────────────────────────────────────────────
+    /// Successor must not be the member itself or an existing member of the group.
+    InvalidSuccessor = 139,
+    /// No successor designation exists for this member / successor pair.
+    SuccessorNotDesignated = 140,
+    /// The designated successor has already accepted.
+    SuccessionAlreadyAccepted = 141,
+    /// The designated successor has not accepted yet.
+    SuccessionNotAccepted = 142,
+    /// The member has not missed enough consecutive contributions yet.
+    SuccessionThresholdNotMet = 143,
+    /// Succession trigger rounds must be positive.
+    InvalidSuccessionTrigger = 144,
+}
+
+/// Extension error codes 151+ — overflow from ExtError2 (50-variant limit).
+#[contracterror]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ExtError3 {
+    // ── Contribution Streak Bonus ─────────────────────────────────────────────
+    /// streak_bonus_bps must be between 0 and 10_000.
+    InvalidStreakBonusBps = 151,
+    /// The cycle has not completed yet, so no allocation exists.
+    StreakCycleNotCompleted = 152,
+    /// The member was not eligible for the cycle's streak bonus.
+    StreakNotEligible = 153,
+    /// The member already claimed the cycle's streak bonus.
+    StreakBonusAlreadyClaimed = 154,
+    // ── Payout Vesting ────────────────────────────────────────────────────────
+    /// The member has no vesting record.
+    NoVestingRecord = 155,
+    /// Nothing has vested since the last claim.
+    NothingVested = 156,
+    // ── Cross-Group Member Obligations ────────────────────────────────────────
+    /// A group cannot be linked to its own obligation index.
+    InvalidLinkedGroup = 157,
+    /// The member is not an active member of the group being linked.
+    NotActiveInLinkedGroup = 158,
+    /// The member's obligation index is full.
+    LinkedGroupLimitReached = 159,
+    // ── Round Deadline Extension ──────────────────────────────────────────────
+    /// Member-voted round extensions are disabled (max extension is 0).
+    RoundExtensionDisabled = 160,
+    /// `extra_seconds` must be positive and within the group maximum.
+    InvalidRoundExtension = 161,
+    /// The current round's deadline has already passed.
+    RoundDeadlineAlreadyPassed = 162,
+    /// An extension has already been approved in the current cycle.
+    RoundAlreadyExtended = 163,
+    // ── Late-Fee Waiver ───────────────────────────────────────────────────────
+    /// No pending or collected (unrefunded) penalty exists for the member and round.
+    PenaltyNotFound = 164,
+    /// The penalty pool does not hold enough free balance to refund the penalty.
+    PenaltyRefundUnavailable = 165,
+    // ── Group Metadata ────────────────────────────────────────────────────────
+    /// Group name exceeds `MAX_GROUP_NAME_LEN` bytes.
+    GroupNameTooLong = 166,
+    /// Group name must not be empty.
+    EmptyGroupName = 167,
 }

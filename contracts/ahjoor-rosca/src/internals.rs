@@ -1,4 +1,4 @@
-use crate::{errors::{Error, ExtError}, events, audit_trail, ContributionEntry, CycleSnapshotData, DataKey, DataKey2, DataKey3, DataKey4, PersistentKey, PayoutRecord, SlotBid, types::{InsuranceClaim, InsuranceCoverageMode}};
+use crate::{errors::{Error, ExtError, ExtError2}, events, audit_trail, streak, vesting, ContributionEntry, CycleSnapshotData, DataKey, DataKey2, DataKey3, DataKey4, DataKey5, PersistentKey, PayoutRecord, SlotBid, types::{InsuranceClaim, InsuranceCoverageMode}};
 use soroban_sdk::{panic_with_error, token, Address, Bytes, BytesN, Env, Map, Vec};
 
 const PERSISTENT_LIFETIME_THRESHOLD: u32 = 100_000;
@@ -55,24 +55,16 @@ pub(crate) fn complete_round_payout(env: &Env, _paid_members: &Vec<Address>) {
         .get(&DataKey2::SkipRequests)
         .unwrap_or(Map::new(env));
 
-    let mut recipient_idx = (current_round % payout_order.len()) as u32;
-    let mut attempts = 0;
-    while attempts < payout_order.len() {
-        let potential_recipient = payout_order.get(recipient_idx).unwrap();
-        let has_skipped = skip_requests.get((potential_recipient.clone(), current_round)).unwrap_or(false);
-        if !suspended_members.contains(&potential_recipient)
-            && !exited_members.contains(&potential_recipient)
-            && !has_skipped
-        {
-            break;
-        }
-        recipient_idx = (recipient_idx + 1) % payout_order.len();
-        attempts += 1;
-    }
-
-    if attempts >= payout_order.len() {
-        panic_with_error!(env, Error::AllMembersSuspended);
-    }
+    let recipient_idx = match select_payout_slot(
+        &payout_order,
+        current_round,
+        &suspended_members,
+        &exited_members,
+        &skip_requests,
+    ) {
+        Some(idx) => idx,
+        None => panic_with_error!(env, Error::AllMembersSuspended),
+    };
 
     let payout_recipient = payout_order.get(recipient_idx).unwrap();
     let preferences: Map<Address, bool> = env
@@ -88,6 +80,11 @@ pub(crate) fn complete_round_payout(env: &Env, _paid_members: &Vec<Address>) {
         .get(&DataKey::RewardPool)
         .unwrap_or(0);
     let base_token: Address = env.storage().instance().get(&DataKey::Token).unwrap();
+    // Base-token funds held for vesting payouts, payout holdbacks and streak
+    // bonuses are not part of the round pot.
+    let reserved_balance = vesting::locked_balance(env)
+        + holdback::locked_balance(env)
+        + streak::reserved_balance(env);
 
     let approved_tokens: Vec<Address> = env
         .storage()
@@ -200,6 +197,7 @@ pub(crate) fn complete_round_payout(env: &Env, _paid_members: &Vec<Address>) {
         if token_addr == base_token {
             balance -= reward_pool;
             balance -= insurance_pool;
+            balance -= reserved_balance;
             actual_pot = balance;
         }
     }
@@ -277,6 +275,7 @@ pub(crate) fn complete_round_payout(env: &Env, _paid_members: &Vec<Address>) {
             // shortfalls.
             balance -= reward_pool;
             balance -= insurance_pool;
+            balance -= reserved_balance;
             total_payout_history_amt = balance;
         }
 
@@ -288,14 +287,42 @@ pub(crate) fn complete_round_payout(env: &Env, _paid_members: &Vec<Address>) {
                 0
             };
 
-            let payout_amount = balance - fee_amount;
+            let mut payout_amount = balance - fee_amount;
+            if token_addr == base_token {
+                payout_amount -= holdback::hold_back(
+                    env,
+                    &payout_recipient,
+                    payout_amount,
+                    current_round,
+                    payout_order.len(),
+                );
+            }
 
             if should_reinvest && token_addr == base_token {
                 reinvested_amount = payout_amount;
                 events::emit_payout_reinvested(env, payout_recipient.clone(), current_round, payout_amount);
+            } else if payout_amount > 0
+                && token_addr == base_token
+                && vesting::vesting_ledgers(env) > 0
+            {
+                vesting::vest_payout(env, &payout_recipient, payout_amount, current_round);
             } else if payout_amount > 0 {
-                // Transfer payout to recipient
-                client.transfer(&env.current_contract_address(), &payout_recipient, &payout_amount);
+                // Transfer payout to the nominated beneficiary, or the recipient
+                // themselves when no beneficiary is set.
+                let payout_destination: Address = env
+                    .storage()
+                    .instance()
+                    .get(&DataKey5::PayoutBeneficiary(payout_recipient.clone()))
+                    .unwrap_or(payout_recipient.clone());
+                client.transfer(&env.current_contract_address(), &payout_destination, &payout_amount);
+                events::emit_payout_delivered(
+                    env,
+                    current_round,
+                    payout_recipient.clone(),
+                    payout_destination,
+                    token_addr.clone(),
+                    payout_amount,
+                );
             }
 
             // Transfer fee to fee recipient
@@ -529,9 +556,126 @@ pub(crate) fn complete_round_payout(env: &Env, _paid_members: &Vec<Address>) {
     }
 }
 
+/// Index into `payout_order` of the member paid out in `round`: the slot at
+/// `round % len`, advanced past members who are suspended, exited or skipping
+/// that round. `None` when no slot is eligible.
+pub(crate) fn select_payout_slot(
+    payout_order: &Vec<Address>,
+    round: u32,
+    suspended_members: &Vec<Address>,
+    exited_members: &Vec<Address>,
+    skip_requests: &Map<(Address, u32), bool>,
+) -> Option<u32> {
+    let len = payout_order.len();
+    if len == 0 {
+        return None;
+    }
+    let mut idx = round % len;
+    for _ in 0..len {
+        let candidate = payout_order.get(idx).unwrap();
+        let has_skipped = skip_requests.get((candidate.clone(), round)).unwrap_or(false);
+        if !suspended_members.contains(&candidate)
+            && !exited_members.contains(&candidate)
+            && !has_skipped
+        {
+            return Some(idx);
+        }
+        idx = (idx + 1) % len;
+    }
+    None
+}
+
+/// Current round, its deadline and the round duration, in the units of the
+/// group's schedule (timestamp or ledger mode). Round `current_round + i` is
+/// due at `deadline + i * duration`.
+pub(crate) fn round_schedule(env: &Env) -> (u32, u64, u64) {
+    let current_round: u32 = env
+        .storage()
+        .instance()
+        .get(&DataKey::CurrentRound)
+        .unwrap_or(0);
+    let use_timestamp: bool = env
+        .storage()
+        .instance()
+        .get(&DataKey2::UseTimestampSchedule)
+        .unwrap_or(false);
+    let (deadline, duration): (u64, u64) = if use_timestamp {
+        (
+            env.storage()
+                .instance()
+                .get(&DataKey::RoundDeadlineTimestamp)
+                .unwrap_or(0),
+            env.storage()
+                .instance()
+                .get(&DataKey2::RoundDurationSeconds)
+                .unwrap_or(0),
+        )
+    } else {
+        (
+            env.storage()
+                .instance()
+                .get(&DataKey::RoundDeadline)
+                .unwrap_or(0),
+            env.storage()
+                .instance()
+                .get(&DataKey::RoundDuration)
+                .unwrap_or(0),
+        )
+    };
+    (current_round, deadline, duration)
+}
+
+/// Pays `amount` of the base token to `members` pro rata to their lifetime
+/// contributions (`MemberCollected`). Rounding dust (or everything, if no one
+/// has contributed) goes to the fee recipient, or the first member when no fee
+/// recipient is set.
+pub(crate) fn distribute_pro_rata(env: &Env, members: &Vec<Address>, amount: i128) {
+    let token_addr: Address = env.storage().instance().get(&DataKey::Token).unwrap();
+    let client = token::Client::new(env, &token_addr);
+    let member_collected: Map<Address, i128> = env
+        .storage()
+        .instance()
+        .get(&DataKey::MemberCollected)
+        .unwrap_or(Map::new(env));
+
+    let mut total_contributions: i128 = 0;
+    for member in members.iter() {
+        total_contributions += member_collected.get(member.clone()).unwrap_or(0);
+    }
+
+    let mut distributed: i128 = 0;
+    if total_contributions > 0 {
+        for member in members.iter() {
+            let contribution = member_collected.get(member.clone()).unwrap_or(0);
+            let share = (contribution * amount) / total_contributions;
+            if share > 0 {
+                client.transfer(&env.current_contract_address(), &member, &share);
+                distributed += share;
+                events::emit_member_refunded(env, member.clone(), share, contribution, amount);
+            }
+        }
+    }
+
+    let remaining = amount - distributed;
+    if remaining > 0 {
+        if let Some(fee_recipient) = env
+            .storage()
+            .instance()
+            .get::<DataKey2, Address>(&DataKey2::FeeRecipient)
+        {
+            client.transfer(&env.current_contract_address(), &fee_recipient, &remaining);
+        } else if let Some(first_member) = members.get(0) {
+            client.transfer(&env.current_contract_address(), &first_member, &remaining);
+        }
+    }
+}
+
 /// Advances the round counter, clears paid-members and per-round contributions,
 /// and sets a new deadline.
 pub(crate) fn reset_round_state(env: &Env, current_round: u32) {
+    // Members who left without paying the closing round lose their holdback.
+    holdback::forfeit_departed(env, current_round);
+
     // #227: Apply pending round duration if one was scheduled
     let pending_duration: Option<u64> = env.storage().instance().get(&DataKey4::PendingRoundDuration);
     let duration: u64 = if let Some(pending) = pending_duration {
@@ -594,6 +738,19 @@ pub(crate) fn reset_round_state(env: &Env, current_round: u32) {
     if cycle_len > 0 && new_round % cycle_len == 0 {
         // New cycle starts, record the timestamp with ledger-mode fix
         let cycle_number = new_round / cycle_len;
+        streak::on_cycle_completed(env, cycle_number - 1);
+        if cycle_limit::limit_reached(env, cycle_number) {
+            // Final cycle done: no next cycle, auction or prepaid draw.
+            cycle_limit::complete_group(env, cycle_number);
+            events::emit_reset(env, current_round);
+            return;
+        }
+        let members: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::Members)
+            .unwrap_or(Vec::new(env));
+        streak::record_roster(env, cycle_number, &members);
         let cycle_start_timestamp = if use_timestamp {
             env.ledger().timestamp()
         } else {
@@ -809,6 +966,58 @@ pub(crate) fn execute_max_members_update(env: &Env, new_max_val: Option<i128>) {
     }
 }
 
+fn load_membership_counts(env: &Env) -> Map<Address, u32> {
+    env.storage()
+        .persistent()
+        .get(&DataKey5::MembershipCount)
+        .unwrap_or(Map::new(env))
+}
+
+fn save_membership_counts(env: &Env, counts: &Map<Address, u32>) {
+    env.storage()
+        .persistent()
+        .set(&DataKey5::MembershipCount, counts);
+    env.storage().persistent().extend_ttl(
+        &DataKey5::MembershipCount,
+        PERSISTENT_LIFETIME_THRESHOLD,
+        PERSISTENT_BUMP_AMOUNT,
+    );
+}
+
+/// Enforces the concurrent-membership cap (`MaxConcurrentMemberships`,
+/// 0 = unlimited) for `member` and records one more active membership.
+/// Call whenever an address is added to the members list.
+pub(crate) fn increment_membership_count(env: &Env, member: &Address) {
+    let cap: u32 = env
+        .storage()
+        .instance()
+        .get(&DataKey5::MaxConcurrentMemberships)
+        .unwrap_or(0);
+    let mut counts = load_membership_counts(env);
+    let count = counts.get(member.clone()).unwrap_or(0);
+    if cap > 0 && count >= cap {
+        panic_with_error!(env, ExtError2::MembershipCapReached);
+    }
+    counts.set(member.clone(), count + 1);
+    save_membership_counts(env, &counts);
+}
+
+/// Releases one active membership for `member`. Call whenever an address
+/// is removed from the members list.
+pub(crate) fn decrement_membership_count(env: &Env, member: &Address) {
+    let mut counts = load_membership_counts(env);
+    let count = counts.get(member.clone()).unwrap_or(0);
+    if count == 0 {
+        return;
+    }
+    if count == 1 {
+        counts.remove(member.clone());
+    } else {
+        counts.set(member.clone(), count - 1);
+    }
+    save_membership_counts(env, &counts);
+}
+
 /// Removes a member from both the members list and the payout order.
 pub(crate) fn execute_member_removal(env: &Env, member: &Address) {
     let old_members: Vec<Address> = env
@@ -816,6 +1025,9 @@ pub(crate) fn execute_member_removal(env: &Env, member: &Address) {
         .instance()
         .get(&DataKey::Members)
         .unwrap_or(Vec::new(env));
+    if old_members.contains(member) {
+        decrement_membership_count(env, member);
+    }
     let mut new_members: Vec<Address> = Vec::new(env);
     for m in old_members.iter() {
         if m != *member {

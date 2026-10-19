@@ -1,12 +1,13 @@
 #![cfg(test)]
+extern crate std;
 
 use crate::{
-    TokenWhitelistContract, TokenWhitelistContractClient, MAX_QUOTA_PERIOD_LEDGERS,
-    MAX_VOLUME_QUERY_RANGE,
+    TokenQuota, TokenWhitelistContract, TokenWhitelistContractClient, MAX_BATCH_ADD_TOKENS,
+    MAX_QUOTA_PERIOD_LEDGERS, MAX_VOLUME_QUERY_RANGE,
 };
 use soroban_sdk::{
     testutils::{Address as _, Events, Ledger},
-    Address, BytesN, Env,
+    Address, BytesN, Env, Vec,
 };
 
 fn setup_test() -> (Env, Address, TokenWhitelistContractClient<'static>) {
@@ -827,4 +828,340 @@ fn test_get_current_period_volume_matches_recorded_and_resets_after_rollover() {
     // record_token_volume's internal accounting does.
     env.ledger().set_sequence_number(1_000 + 48 * 2);
     assert_eq!(client.get_current_period_volume(&token), 0);
+}
+
+// ── #926: fuzz-like sweep over admin entry points ───────────────────────────
+
+const UNAUTHORIZED: &str = "Unauthorized: caller is not admin";
+
+/// Deterministic xorshift PRNG so the sweep is reproducible without adding a
+/// fuzzing dependency to this crate.
+struct FuzzRng(u64);
+
+impl FuzzRng {
+    fn next(&mut self) -> u64 {
+        let mut x = self.0;
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        self.0 = x;
+        x
+    }
+
+    fn pick<T: Copy>(&mut self, pool: &[T]) -> T {
+        pool[(self.next() % pool.len() as u64) as usize]
+    }
+
+    fn one_in(&mut self, n: u64) -> bool {
+        self.next() % n == 0
+    }
+}
+
+/// Like `setup_test`, but sets the ledger sequence before the contract is
+/// registered so every storage entry's TTL is relative to that sequence.
+fn setup_at_sequence(sequence: u32) -> (Env, Address, TokenWhitelistContractClient<'static>) {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_sequence_number(sequence);
+
+    let admin = Address::generate(&env);
+    let contract_id = env.register(TokenWhitelistContract, ());
+    let client = TokenWhitelistContractClient::new(&env, &contract_id);
+
+    client.initialize(&admin);
+
+    (env, admin, client)
+}
+
+/// Runs `f` and asserts it panics with a message containing `expected`,
+/// the same check `#[should_panic(expected = ...)]` performs.
+fn assert_panics_with(case: u32, expected: &str, f: impl FnOnce()) {
+    let payload = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).expect_err(
+        &std::format!("case {}: expected panic `{}` but call succeeded", case, expected),
+    );
+    let message = payload
+        .downcast_ref::<std::string::String>()
+        .map(|s| s.as_str())
+        .or_else(|| payload.downcast_ref::<&str>().copied())
+        .unwrap_or("");
+    assert!(
+        message.contains(expected),
+        "case {}: expected panic `{}`, got `{}`",
+        case,
+        expected,
+        message
+    );
+}
+
+/// Validation `set_token_quota` / `update_token_quota` apply to their
+/// numeric inputs, in the order the contract checks them.
+fn quota_input_error(volume: i128, period: u32) -> Option<&'static str> {
+    if volume <= 0 {
+        Some("max_volume_per_period must be positive")
+    } else if period == 0 {
+        Some("period_ledgers must be positive")
+    } else if period > MAX_QUOTA_PERIOD_LEDGERS {
+        Some("period_ledgers exceeds maximum allowed")
+    } else {
+        None
+    }
+}
+
+#[test]
+fn test_fuzz_like_whitelist_inputs_100_cases() {
+    const CASES: u32 = 100;
+
+    // Kept well below u32::MAX so the contract's `sequence + 120_000` TTL
+    // extensions stay in range.
+    let sequences = [0u32, 1, 1_000, 5_000_000];
+    let volumes = [i128::MIN, -1, 0, 1, 2, 1_000_000, i128::MAX - 1, i128::MAX];
+    let periods = [
+        0u32,
+        1,
+        2,
+        24,
+        MAX_QUOTA_PERIOD_LEDGERS - 1,
+        MAX_QUOTA_PERIOD_LEDGERS,
+        MAX_QUOTA_PERIOD_LEDGERS + 1,
+        u32::MAX,
+    ];
+    let batch_sizes = [
+        0u32,
+        1,
+        2,
+        MAX_BATCH_ADD_TOKENS - 1,
+        MAX_BATCH_ADD_TOKENS,
+        MAX_BATCH_ADD_TOKENS + 1,
+    ];
+
+    let mut rng = FuzzRng(0x9E37_79B9_7F4A_7C15);
+    let mut accepted = 0u32;
+    let mut rejected = 0u32;
+
+    for case in 0..CASES {
+        let sequence = rng.pick(&sequences);
+        let (env, admin, client) = setup_at_sequence(sequence);
+        let token = Address::generate(&env);
+        let caller = if rng.one_in(5) { Address::generate(&env) } else { admin.clone() };
+        let is_admin = caller == admin;
+
+        let expected_err = match case % 5 {
+            // add_token: fresh vs. already-whitelisted token.
+            0 => {
+                let already = rng.one_in(3);
+                if already {
+                    client.add_token(&admin, &token);
+                }
+                let expected = if !is_admin {
+                    Some(UNAUTHORIZED)
+                } else if already {
+                    Some("Token already whitelisted")
+                } else {
+                    None
+                };
+                match expected {
+                    Some(msg) => assert_panics_with(case, msg, || client.add_token(&caller, &token)),
+                    None => {
+                        client.add_token(&caller, &token);
+                        assert!(client.is_whitelisted(&token), "case {}", case);
+                    }
+                }
+                expected
+            }
+            // batch_add_tokens: empty, within, at, and just over the batch cap.
+            1 => {
+                let size = rng.pick(&batch_sizes);
+                let mut tokens = Vec::new(&env);
+                for _ in 0..size {
+                    tokens.push_back(Address::generate(&env));
+                }
+                let duplicate = size > 0 && rng.one_in(4);
+                if duplicate {
+                    client.add_token(&admin, &tokens.get(0).unwrap());
+                }
+                let before = client.get_whitelisted_tokens(&0, &50).len();
+                let expected = if !is_admin {
+                    Some(UNAUTHORIZED)
+                } else if size == 0 {
+                    Some("Batch cannot be empty")
+                } else if size > MAX_BATCH_ADD_TOKENS {
+                    Some("Batch size exceeds maximum allowed")
+                } else if duplicate {
+                    Some("Token already whitelisted")
+                } else {
+                    None
+                };
+                match expected {
+                    Some(msg) => {
+                        assert_panics_with(case, msg, || client.batch_add_tokens(&caller, &tokens));
+                        assert_eq!(client.get_whitelisted_tokens(&0, &50).len(), before, "case {}", case);
+                    }
+                    None => {
+                        client.batch_add_tokens(&caller, &tokens);
+                        assert_eq!(
+                            client.get_whitelisted_tokens(&0, &50).len(),
+                            before + size,
+                            "case {}",
+                            case
+                        );
+                    }
+                }
+                expected
+            }
+            // set_token_quota: volume/period boundaries on (non-)whitelisted tokens.
+            2 => {
+                let whitelisted = !rng.one_in(4);
+                let has_quota = whitelisted && rng.one_in(4);
+                if whitelisted {
+                    client.add_token(&admin, &token);
+                }
+                if has_quota {
+                    client.set_token_quota(&admin, &token, &1_000i128, &100u32);
+                }
+                let volume = rng.pick(&volumes);
+                let period = rng.pick(&periods);
+                let before = client.get_token_quota(&token);
+                let expected = if !is_admin {
+                    Some(UNAUTHORIZED)
+                } else if !whitelisted {
+                    Some("Token not whitelisted")
+                } else if has_quota {
+                    Some("Token already has quota")
+                } else {
+                    quota_input_error(volume, period)
+                };
+                match expected {
+                    Some(msg) => {
+                        assert_panics_with(case, msg, || {
+                            client.set_token_quota(&caller, &token, &volume, &period)
+                        });
+                        assert_eq!(client.get_token_quota(&token), before, "case {}", case);
+                    }
+                    None => {
+                        client.set_token_quota(&caller, &token, &volume, &period);
+                        assert_eq!(
+                            client.get_token_quota(&token),
+                            Some(TokenQuota { max_volume_per_period: volume, period_ledgers: period }),
+                            "case {}",
+                            case
+                        );
+                    }
+                }
+                expected
+            }
+            // update_token_quota: same boundaries, with and without an existing quota.
+            3 => {
+                let has_quota = !rng.one_in(4);
+                client.add_token(&admin, &token);
+                if has_quota {
+                    client.set_token_quota(&admin, &token, &1_000i128, &100u32);
+                }
+                let volume = rng.pick(&volumes);
+                let period = rng.pick(&periods);
+                let before = client.get_token_quota(&token);
+                let expected = if !is_admin {
+                    Some(UNAUTHORIZED)
+                } else if let Some(msg) = quota_input_error(volume, period) {
+                    Some(msg)
+                } else if !has_quota {
+                    Some("Token has no quota")
+                } else {
+                    None
+                };
+                match expected {
+                    Some(msg) => {
+                        assert_panics_with(case, msg, || {
+                            client.update_token_quota(&caller, &token, &volume, &period)
+                        });
+                        assert_eq!(client.get_token_quota(&token), before, "case {}", case);
+                    }
+                    None => {
+                        client.update_token_quota(&caller, &token, &volume, &period);
+                        assert_eq!(
+                            client.get_token_quota(&token),
+                            Some(TokenQuota { max_volume_per_period: volume, period_ledgers: period }),
+                            "case {}",
+                            case
+                        );
+                    }
+                }
+                expected
+            }
+            // suspend_token_timed: zero, small, and maximum representable durations.
+            _ => {
+                let whitelisted = !rng.one_in(4);
+                let already_suspended = whitelisted && rng.one_in(4);
+                let reason = BytesN::from_array(&env, &[case as u8; 32]);
+                if whitelisted {
+                    client.add_token(&admin, &token);
+                }
+                if already_suspended {
+                    client.suspend_token_timed(&admin, &token, &50u32, &reason);
+                }
+                // `sequence + duration` is unchecked in the contract, so the
+                // largest duration swept is the largest that still fits in u32.
+                let durations = [
+                    0u32,
+                    1,
+                    2,
+                    MAX_QUOTA_PERIOD_LEDGERS,
+                    u32::MAX - sequence - 1,
+                    u32::MAX - sequence,
+                ];
+                let duration = rng.pick(&durations);
+                let history_before = client.get_suspension_history(&token).len();
+                let expected = if !is_admin {
+                    Some(UNAUTHORIZED)
+                } else if !whitelisted {
+                    Some("Token not whitelisted")
+                } else if already_suspended {
+                    Some("Token already suspended")
+                } else {
+                    None
+                };
+                match expected {
+                    Some(msg) => {
+                        assert_panics_with(case, msg, || {
+                            client.suspend_token_timed(&caller, &token, &duration, &reason)
+                        });
+                        assert_eq!(
+                            client.get_suspension_history(&token).len(),
+                            history_before,
+                            "case {}",
+                            case
+                        );
+                    }
+                    None => {
+                        client.suspend_token_timed(&caller, &token, &duration, &reason);
+                        assert_eq!(
+                            client.get_suspension_history(&token).len(),
+                            history_before + 1,
+                            "case {}",
+                            case
+                        );
+                        if duration == 0 {
+                            // A zero-length suspension expires on the ledger it starts.
+                            assert!(client.get_token_suspension(&token).is_none(), "case {}", case);
+                            assert!(client.is_token_allowed(&token), "case {}", case);
+                        } else {
+                            let record = client.get_token_suspension(&token).unwrap();
+                            assert_eq!(record.expiry_ledger, sequence + duration, "case {}", case);
+                            assert!(!client.is_token_allowed(&token), "case {}", case);
+                        }
+                    }
+                }
+                expected
+            }
+        };
+
+        if expected_err.is_some() {
+            rejected += 1;
+        } else {
+            accepted += 1;
+        }
+    }
+
+    assert_eq!(accepted + rejected, CASES);
+    assert!(accepted > 0, "sweep never exercised an accepted input");
+    assert!(rejected > 0, "sweep never exercised a rejected input");
 }

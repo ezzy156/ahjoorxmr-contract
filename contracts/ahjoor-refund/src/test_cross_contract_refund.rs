@@ -127,12 +127,51 @@ fn test_add_and_remove_origin_contract() {
     let origin = Address::generate(&env);
     refund_client.add_refund_origin_contract(&admin, &origin);
 
-    let whitelist = refund_client.get_cross_contract_whitelist();
+    let whitelist = refund_client.get_cross_contract_whitelist(&0u32, &10u32);
     assert_eq!(whitelist.len(), 1);
 
     refund_client.remove_refund_origin_contract(&admin, &origin);
-    let whitelist = refund_client.get_cross_contract_whitelist();
+    let whitelist = refund_client.get_cross_contract_whitelist(&0u32, &10u32);
     assert_eq!(whitelist.len(), 0);
+}
+
+#[test]
+fn test_cross_contract_whitelist_pagination_middle_page() {
+    let (env, refund_client, _payment_client, admin, _token_addr, _token_admin) = setup_cc();
+
+    let mut origin0 = Address::generate(&env);
+    for _ in 0..7 {
+        refund_client.add_refund_origin_contract(&admin, &origin0);
+        origin0 = Address::generate(&env);
+    }
+
+    let page = refund_client.get_cross_contract_whitelist(&2u32, &3u32);
+    assert_eq!(page.len(), 3);
+
+    let first_page = refund_client.get_cross_contract_whitelist(&0u32, &7u32);
+    assert_eq!(page.get(0).unwrap(), first_page.get(2).unwrap());
+    assert_eq!(page.get(1).unwrap(), first_page.get(3).unwrap());
+    assert_eq!(page.get(2).unwrap(), first_page.get(4).unwrap());
+}
+
+#[test]
+fn test_cross_contract_whitelist_pagination_runs_past_end() {
+    let (env, refund_client, _payment_client, admin, _token_addr, _token_admin) = setup_cc();
+
+    let mut origin0 = Address::generate(&env);
+    for _ in 0..7 {
+        refund_client.add_refund_origin_contract(&admin, &origin0);
+        origin0 = Address::generate(&env);
+    }
+
+    let partial = refund_client.get_cross_contract_whitelist(&5u32, &4u32);
+    assert_eq!(partial.len(), 2);
+
+    let empty = refund_client.get_cross_contract_whitelist(&7u32, &4u32);
+    assert_eq!(empty.len(), 0);
+
+    let zero_limit = refund_client.get_cross_contract_whitelist(&0u32, &0u32);
+    assert_eq!(zero_limit.len(), 0);
 }
 
 #[test]

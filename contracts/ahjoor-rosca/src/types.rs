@@ -1,4 +1,4 @@
-use soroban_sdk::{contracttype, Address, BytesN, Map, String, Vec};
+use soroban_sdk::{contracttype, Address, BytesN, Map, String, Symbol, Vec};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[contracttype]
@@ -145,6 +145,13 @@ pub enum ProposalType {
     MaxMembersUpdate = 3,
     Reinstatement = 4, // #218
     MemberFreeze = 5,  // Member-initiated emergency freeze
+    CharterUpdate = 6, // Replace the group charter after activation
+    PayoutVestingUpdate = 7, // Change payout_vesting_ledgers after activation
+    /// Extend the current round's contribution deadline. `execution_data`
+    /// carries `extra_seconds`, bounded by `MaxRoundExtensionSeconds`.
+    ExtendRound = 8,
+    /// Waive `target_member`'s penalty for the round in `execution_data`.
+    WaivePenalty = 9,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -444,6 +451,175 @@ pub enum DataKey5 {
     /// Option<GroupCloneRecord> — metadata written when this contract was created
     /// by cloning another group.  None when the group was created from scratch.
     CloneOrigin,
+
+    // ── Payout Beneficiary Nomination ─────────────────────────────────────────
+    /// Address — the beneficiary nominated by a member to receive their payout.
+    PayoutBeneficiary(Address),
+
+    // ── Group Charter ─────────────────────────────────────────────────────────
+    /// GroupCharter — current charter (hash + URI + version). Absent = no charter.
+    GroupCharter,
+    /// u32 — latest charter version acknowledged by an address (persistent).
+    CharterAck(Address),
+    /// (BytesN<32>, String) — charter awaiting a `CharterUpdate` proposal (persistent).
+    PendingCharter(u32),
+
+    // ── Membership Succession ─────────────────────────────────────────────────
+    /// u32 — consecutive missed contributions that allow a successor to claim.
+    SuccessionTriggerRounds,
+    /// Map<Address, u32> — consecutive rounds each member has missed.
+    ConsecutiveMisses,
+    /// SuccessorDesignation — member → designated successor (persistent).
+    Successor(Address),
+    /// Address — successor → the member whose slot they took over (persistent).
+    SucceededFrom(Address),
+
+    // ── Contribution Streak Bonus ─────────────────────────────────────────────
+    /// u32 — share of the streak pool allocated per qualifying member, in bps.
+    StreakBonusBps,
+    /// i128 — funded streak bonus balance not yet allocated to a cycle.
+    StreakBonusPool,
+    /// i128 — allocated to completed cycles but not yet claimed.
+    StreakBonusAllocated,
+    /// Vec<Address> — members at the start of a cycle (persistent).
+    StreakRoster(u32),
+    /// Vec<Address> — members whose streak broke during a cycle (persistent).
+    StreakBroken(u32),
+    /// StreakCycleAllocation — eligible members and per-member share (persistent).
+    StreakAllocation(u32),
+    /// bool — (cycle, member) has claimed their streak bonus (persistent).
+    StreakClaimed(u32, Address),
+
+    // ── Payout Vesting ────────────────────────────────────────────────────────
+    /// u32 — ledgers over which each round payout vests (0 = lump sum).
+    PayoutVestingLedgers,
+    /// VestingRecord — a member's current vesting payout (persistent).
+    VestingRecord(Address),
+    /// i128 — base-token balance locked in vesting records.
+    VestingLocked,
+    /// u32 — vesting period awaiting a `PayoutVestingUpdate` proposal (persistent).
+    PendingVestingLedgers(u32),
+
+    // ── Payout Holdback ───────────────────────────────────────────────────────
+    /// u32 — share of each payout withheld until the recipient's remaining
+    /// contributions for the cycle are made, in bps (0 = disabled, max 5000).
+    PayoutHoldbackBps,
+    /// HoldbackRecord — amount withheld from (member, cycle)'s payout (persistent).
+    Holdback(Address, u32),
+    /// Map<Address, u32> — member → cycle of their newest unsettled holdback.
+    HoldbackOpen,
+    /// i128 — base-token balance withheld in unsettled holdbacks.
+    HoldbackLocked,
+
+    // ── Maximum Cycle Count ───────────────────────────────────────────────────
+    /// u32 — number of cycles after which the group completes. Absent = unlimited.
+    MaxCycles,
+
+    // ── Member Ban List ───────────────────────────────────────────────────────
+    /// BytesN<32> — reason hash for a banned address (persistent). Absent = not banned.
+    Banned(Address),
+}
+
+// ── Contribution Streak Bonus ─────────────────────────────────────────────────
+
+/// Snapshot taken when a cycle completes: every member in `eligible` may claim
+/// `per_member_amount` once.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StreakCycleAllocation {
+    pub cycle: u32,
+    pub eligible: Vec<Address>,
+    pub per_member_amount: i128,
+    pub claimed_count: u32,
+}
+
+/// View returned by `get_streak_status`.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StreakStatus {
+    /// Cycle currently in progress (0-based).
+    pub current_cycle: u32,
+    /// `true` while the member is on the cycle roster with no late
+    /// contribution, skip, missed round or emergency exit request.
+    pub on_track: bool,
+    /// Most recently completed cycle the member is eligible for and has not
+    /// yet claimed, if any.
+    pub claimable_cycle: Option<u32>,
+    /// Amount claimable for `claimable_cycle` (0 when none).
+    pub claimable_amount: i128,
+}
+
+// ── Payout Vesting ────────────────────────────────────────────────────────────
+
+/// A round payout vesting linearly from `start` (ledger) over `duration`
+/// ledgers. `covered` is the part of the unvested tail used to cover the
+/// member's missed contributions; it is no longer claimable.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VestingRecord {
+    pub member: Address,
+    pub total: i128,
+    pub released: i128,
+    pub start: u32,
+    pub duration: u32,
+    pub covered: i128,
+}
+
+// ── Payout Holdback ───────────────────────────────────────────────────────────
+
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum HoldbackStatus {
+    /// Withheld; releasable once the member's remaining contributions are made.
+    Held = 0,
+    /// Paid out to the member (or their payout beneficiary).
+    Released = 1,
+    /// Applied to a missed contribution; the rest went to the insurance pool.
+    Forfeited = 2,
+}
+
+/// Share of a payout withheld from `member` in `cycle`. The member owes
+/// contributions for rounds `payout_round + 1 ..= last_round`; once those are
+/// made the holdback can be released.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HoldbackRecord {
+    pub member: Address,
+    pub cycle: u32,
+    pub amount: i128,
+    pub payout_round: u32,
+    pub last_round: u32,
+    /// Part of `amount` used to cover a missed contribution.
+    pub covered: i128,
+    /// Part of `amount` forfeited to the group's insurance pool.
+    pub forfeited: i128,
+    pub status: HoldbackStatus,
+}
+
+// ── Group Charter ─────────────────────────────────────────────────────────────
+
+/// Off-chain rules document anchored by hash. `version` starts at 1 and is
+/// bumped on every change; members must acknowledge the current version.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GroupCharter {
+    pub version: u32,
+    pub charter_hash: BytesN<32>,
+    pub uri: String,
+    pub set_at_ledger: u32,
+}
+
+// ── Membership Succession ─────────────────────────────────────────────────────
+
+/// A member's designated successor. The successor must accept before they
+/// can claim the slot.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SuccessorDesignation {
+    pub member: Address,
+    pub successor: Address,
+    pub accepted: bool,
+    pub designated_at_ledger: u32,
 }
 
 // ── Scoped Co-Admin Role ──────────────────────────────────────────────────────
@@ -465,6 +641,8 @@ pub enum CoAdminPermission {
     ManageTokens = 4,
     /// Can update round configuration (duration, grace period, etc.).
     ManageRoundConfig = 5,
+    /// Can update group metadata (name, category, description hash).
+    ManageMetadata = 6,
 }
 
 /// Record stored per co-admin address.
@@ -733,6 +911,8 @@ pub enum GroupStatus {
     Merged = 2,
     /// Group was split into two sub-groups; no further operations permitted.
     Split = 3,
+    /// Group ran its configured `max_cycles`; contributions are rejected.
+    Completed = 4,
 }
 
 #[contracttype]
@@ -1019,4 +1199,89 @@ pub struct GroupAnalytics {
     pub avg_credit_score: i128,
     pub avg_reputation_score: i128,
     pub fee_bps: u32,
+}
+
+/// Overflow key enum — DataKey5 is capped at 50 variants by the soroban XDR limit.
+#[derive(Clone)]
+#[contracttype]
+pub enum DataKey6 {
+    // ── Cross-Group Member Obligations ────────────────────────────────────────
+    /// Vec<Address> — other ROSCA group contracts `member` has linked to their
+    /// obligation index (persistent). This contract is always included
+    /// implicitly while the member is active here.
+    MemberGroupIndex(Address),
+
+    // ── Round Deadline Extension ──────────────────────────────────────────────
+    /// u64 — maximum `extra_seconds` an `ExtendRound` proposal may request.
+    /// 0 (default) disables member-voted extensions.
+    MaxRoundExtensionSeconds,
+    /// u32 — cycle in which the last `ExtendRound` proposal was applied.
+    LastExtendedCycle,
+
+    // ── Late-Fee Waiver ───────────────────────────────────────────────────────
+    /// CollectedPenaltyRecord — penalty collected from (member, round) (persistent).
+    CollectedPenalty(Address, u32),
+
+    // ── Group Metadata ────────────────────────────────────────────────────────
+    /// GroupMetadata — display name, category and description hash.
+    GroupMetadata,
+}
+
+// ── Cross-Group Member Obligations ────────────────────────────────────────────
+
+/// Outstanding contribution a member owes to one group for its current round.
+/// `group_id` is the group's contract address (one group per contract).
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MemberObligation {
+    pub group_id: Address,
+    pub token: Address,
+    pub amount_due: i128,
+    pub deadline: u64,
+}
+
+// ── Late-Fee Waiver ───────────────────────────────────────────────────────────
+
+/// Penalty collected from a member for a round, kept so it can be refunded by
+/// an approved `WaivePenalty` proposal.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CollectedPenaltyRecord {
+    pub member: Address,
+    pub round: u32,
+    /// Token the penalty was paid in (the group's base token).
+    pub token: Address,
+    /// Total collected for this (member, round).
+    pub amount: i128,
+    /// Net reputation change applied when the penalty was collected.
+    pub reputation_delta: i128,
+    /// Number of times the penalty was applied (each one added a default).
+    pub applications: u32,
+    pub refunded: bool,
+}
+
+// ── Group Metadata ────────────────────────────────────────────────────────────
+
+/// Human-readable group metadata, editable by the admin.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GroupMetadata {
+    pub name: String,
+    pub category: Symbol,
+    pub description_hash: BytesN<32>,
+    pub updated_at_ledger: u32,
+}
+
+/// Public directory listing for this group.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GroupDirectoryEntry {
+    pub group_id: Address,
+    pub metadata: Option<GroupMetadata>,
+    pub status: GroupStatus,
+    pub token: Address,
+    pub contribution_amount: i128,
+    pub member_count: u32,
+    pub max_members: u32,
+    pub current_round: u32,
 }

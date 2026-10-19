@@ -162,7 +162,7 @@ fn test_freeze_log_appended() {
     client.freeze_group(&admin, &0, &reason_hash(&env));
     client.unfreeze_group(&admin, &0, &resolution_hash(&env));
 
-    let log = client.get_freeze_log();
+    let log = client.get_freeze_log(&0u32, &10u32);
     assert_eq!(log.len(), 1);
     let record = log.get(0).unwrap();
     assert_eq!(record.reason_hash, reason_hash(&env));
@@ -202,7 +202,7 @@ fn test_member_freeze_proposal_executes_and_freezes_group() {
     client.unfreeze_group(&admin, &0, &resolution_hash(&env));
     client.contribute(&member1, &_token_admin, &100);
 
-    let log = client.get_freeze_log();
+    let log = client.get_freeze_log(&0u32, &10u32);
     assert!(log.len() >= 1);
     let record = log.get(log.len() - 1).unwrap();
     assert_eq!(record.reason_hash, member_reason);
@@ -215,4 +215,51 @@ fn test_non_member_cannot_propose_member_freeze() {
 
     let result = client.try_propose_member_freeze(&outsider, &reason_hash(&env));
     assert!(result.is_err());
+}
+
+fn seed_freeze_log(env: &Env, client: &AhjoorContractClient<'_>) -> soroban_sdk::Vec<FreezeRecord> {
+    let mut seeded = soroban_sdk::Vec::new(env);
+    for i in 0..7u32 {
+        seeded.push_back(FreezeRecord {
+            frozen_at_ledger: i,
+            frozen_by: Address::generate(env),
+            reason_hash: BytesN::from_array(env, &[i as u8; 32]),
+            unfrozen_at_ledger: None,
+            resolution_hash: None,
+        });
+    }
+    let stored = seeded.clone();
+    env.as_contract(&client.address, || {
+        env.storage()
+            .persistent()
+            .set(&PersistentKey::FreezeLog, &stored);
+    });
+    seeded
+}
+
+#[test]
+fn test_get_freeze_log_pagination_middle_page() {
+    let (env, client, _admin, _token_admin, _members) = setup_freeze_test();
+    let seeded = seed_freeze_log(&env, &client);
+
+    let page = client.get_freeze_log(&2u32, &3u32);
+    assert_eq!(page.len(), 3);
+    assert_eq!(page.get(0).unwrap(), seeded.get(2).unwrap());
+    assert_eq!(page.get(1).unwrap(), seeded.get(3).unwrap());
+    assert_eq!(page.get(2).unwrap(), seeded.get(4).unwrap());
+}
+
+#[test]
+fn test_get_freeze_log_pagination_runs_past_end() {
+    let (env, client, _admin, _token_admin, _members) = setup_freeze_test();
+    let _seeded = seed_freeze_log(&env, &client);
+
+    let partial = client.get_freeze_log(&5u32, &4u32);
+    assert_eq!(partial.len(), 2);
+
+    let empty = client.get_freeze_log(&7u32, &4u32);
+    assert_eq!(empty.len(), 0);
+
+    let zero_limit = client.get_freeze_log(&0u32, &0u32);
+    assert_eq!(zero_limit.len(), 0);
 }

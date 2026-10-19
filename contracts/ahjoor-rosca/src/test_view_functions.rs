@@ -321,3 +321,72 @@ fn test_get_reward_dist_params_default_and_set() {
         (DistributionType::Weighted, Some(weights))
     );
 }
+
+// ─── get_reinstatement_fee ────────────────────────────────────────────────
+
+#[test]
+fn test_get_reinstatement_fee_defaults_to_zero() {
+    let (_env, client, _admin, _token, _members) = setup_with_members(3, false, 0);
+    assert_eq!(client.get_reinstatement_fee(), 0);
+}
+
+#[test]
+fn test_get_reinstatement_fee_returns_configured_value() {
+    let (_env, client, admin, _token, _members) = setup_with_members(3, false, 0);
+    client.set_reinstatement_fee(&admin, &250);
+    assert_eq!(client.get_reinstatement_fee(), 250);
+}
+
+#[test]
+fn test_get_reinstatement_fee_reflects_latest_update() {
+    let (_env, client, admin, _token, _members) = setup_with_members(3, false, 0);
+    client.set_reinstatement_fee(&admin, &250);
+    client.set_reinstatement_fee(&admin, &0);
+    assert_eq!(client.get_reinstatement_fee(), 0);
+}
+
+// ─── get_score_weights ────────────────────────────────────────────────────
+
+#[test]
+fn test_get_score_weights_returns_defaults_when_unset() {
+    let (_env, client, _admin, _token, _members) = setup_with_members(3, false, 0);
+    assert_eq!(
+        client.get_score_weights(),
+        ScoreWeights {
+            on_time_weight: 10,
+            late_weight: -2,
+            default_weight: -20,
+            exit_weight: -15,
+            completion_weight: 30,
+        }
+    );
+}
+
+#[test]
+fn test_get_score_weights_returns_configured_weights() {
+    let (_env, client, admin, _token, _members) = setup_with_members(3, false, 0);
+    client.set_score_weights(&admin, &5, &-1, &-10, &-8, &20);
+    assert_eq!(
+        client.get_score_weights(),
+        ScoreWeights {
+            on_time_weight: 5,
+            late_weight: -1,
+            default_weight: -10,
+            exit_weight: -8,
+            completion_weight: 20,
+        }
+    );
+}
+
+#[test]
+fn test_get_score_weights_unchanged_after_rejected_update() {
+    let (env, client, admin, _token, _members) = setup_with_members(3, false, 0);
+    client.set_score_weights(&admin, &5, &-1, &-10, &-8, &20);
+
+    let intruder = Address::generate(&env);
+    let result = client.try_set_score_weights(&intruder, &1, &1, &1, &1, &1);
+    assert!(result.is_err());
+
+    assert_eq!(client.get_score_weights().on_time_weight, 5);
+    assert_eq!(client.get_score_weights().completion_weight, 20);
+}

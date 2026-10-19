@@ -220,5 +220,73 @@ pub fn emit_listing_vetoed(e: &Env, proposal_id: u32, reason_hash: BytesN<32>) {
     ListingVetoed { proposal_id, reason_hash }.publish(e);
 }
 
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct TokenDeprecated {
+    pub token: Address,
+    pub admin: Address,
+    pub sunset_ledger: u32,
+}
+
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct TokenUndeprecated {
+    pub token: Address,
+    pub admin: Address,
+}
+
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct TokenSunset {
+    pub token: Address,
+    pub sunset_ledger: u32,
+    pub ledger: u32,
+}
+
+pub fn emit_token_deprecated(e: &Env, token: Address, admin: Address, sunset_ledger: u32) {
+    TokenDeprecated { token, admin, sunset_ledger }.publish(e);
+}
+
+pub fn emit_token_undeprecated(e: &Env, token: Address, admin: Address) {
+    TokenUndeprecated { token, admin }.publish(e);
+}
+
+pub fn emit_token_sunset(e: &Env, token: Address, sunset_ledger: u32, ledger: u32) {
+    TokenSunset { token, sunset_ledger, ledger }.publish(e);
+}
+
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct GuardianSet {
+    pub admin: Address,
+    pub guardian: Option<Address>,
+}
+
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct MaxGuardianSuspensionSet {
+    pub ledgers: u32,
+}
+
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct TokenSuspendedByGuardian {
+    pub token: Address,
+    pub guardian: Address,
+    pub expiry_ledger: u32,
+}
+
+pub fn emit_guardian_set(e: &Env, admin: Address, guardian: Option<Address>) {
+    GuardianSet { admin, guardian }.publish(e);
+}
+
+pub fn emit_max_guardian_suspension_set(e: &Env, ledgers: u32) {
+    MaxGuardianSuspensionSet { ledgers }.publish(e);
+}
+
+pub fn emit_token_suspended_by_guardian(e: &Env, token: Address, guardian: Address, expiry_ledger: u32) {
+    TokenSuspendedByGuardian { token, guardian, expiry_ledger }.publish(e);
+}
+
 #[allow(dead_code)]
 fn _use_symbol(_: Symbol) {}

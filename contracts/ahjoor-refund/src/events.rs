@@ -50,6 +50,8 @@ pub struct RefundApproved {
     pub refund_id: u32,
     pub approved_by: Address,
     pub approved_at: u64,
+    /// Restocking fee deducted from the refund (0 = none).
+    pub restocking_fee: i128,
 }
 
 /// Event: Refund rejected
@@ -265,11 +267,18 @@ pub fn emit_refund_requested(
     .publish(e);
 }
 
-pub fn emit_refund_approved(e: &Env, refund_id: u32, approved_by: Address, approved_at: u64) {
+pub fn emit_refund_approved(
+    e: &Env,
+    refund_id: u32,
+    approved_by: Address,
+    approved_at: u64,
+    restocking_fee: i128,
+) {
     RefundApproved {
         refund_id,
         approved_by,
         approved_at,
+        restocking_fee,
     }
     .publish(e);
 }
@@ -1113,4 +1122,166 @@ pub fn emit_evidence_anchored(
         timestamp,
     }
     .publish(e);
+}
+
+// ─── Merchant Restocking Fee ─────────────────────────────────────────────────
+
+/// Event: Admin updated the maximum restocking fee cap
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct MaxRestockingFeeSet {
+    pub max_bps: u32,
+}
+
+pub fn emit_max_restocking_fee_set(e: &Env, max_bps: u32) {
+    MaxRestockingFeeSet { max_bps }.publish(e);
+}
+
+/// Event: Merchant configured a restocking fee (reason_code None = default)
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct RestockingFeeSet {
+    pub merchant: Address,
+    pub reason_code: Option<u32>,
+    pub fee_bps: u32,
+}
+
+pub fn emit_restocking_fee_set(e: &Env, merchant: Address, reason_code: Option<u32>, fee_bps: u32) {
+    RestockingFeeSet {
+        merchant,
+        reason_code,
+        fee_bps,
+    }
+    .publish(e);
+}
+
+/// Event: Restocking fee deducted from an approved refund
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct RestockingFeeApplied {
+    pub refund_id: u32,
+    pub merchant: Address,
+    pub fee_bps: u32,
+    pub fee_amount: i128,
+}
+
+pub fn emit_restocking_fee_applied(
+    e: &Env,
+    refund_id: u32,
+    merchant: Address,
+    fee_bps: u32,
+    fee_amount: i128,
+) {
+    RestockingFeeApplied {
+        refund_id,
+        merchant,
+        fee_bps,
+        fee_amount,
+    }
+    .publish(e);
+}
+
+// ─── Product Recall Events ───────────────────────────────────────────────────
+
+/// Event: Merchant declared a product recall
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct RecallDeclared {
+    pub recall_id: u32,
+    pub merchant: Address,
+    pub recall_id_hash: BytesN<32>,
+    pub payment_count: u32,
+    pub refund_bps: u32,
+    pub locked_amount: i128,
+    pub claim_deadline: u64,
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn emit_recall_declared(
+    e: &Env,
+    recall_id: u32,
+    merchant: Address,
+    recall_id_hash: BytesN<32>,
+    payment_count: u32,
+    refund_bps: u32,
+    locked_amount: i128,
+    claim_deadline: u64,
+) {
+    RecallDeclared {
+        recall_id,
+        merchant,
+        recall_id_hash,
+        payment_count,
+        refund_bps,
+        locked_amount,
+        claim_deadline,
+    }
+    .publish(e);
+}
+
+/// Event: Customer claimed a recall refund
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct RecallRefundClaimed {
+    pub recall_id: u32,
+    pub payment_id: u32,
+    pub customer: Address,
+    pub amount: i128,
+}
+
+pub fn emit_recall_refund_claimed(
+    e: &Env,
+    recall_id: u32,
+    payment_id: u32,
+    customer: Address,
+    amount: i128,
+) {
+    RecallRefundClaimed {
+        recall_id,
+        payment_id,
+        customer,
+        amount,
+    }
+    .publish(e);
+}
+
+/// Event: Merchant closed a recall and released unclaimed reserve
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct RecallClosed {
+    pub recall_id: u32,
+    pub merchant: Address,
+    pub released_amount: i128,
+}
+
+pub fn emit_recall_closed(e: &Env, recall_id: u32, merchant: Address, released_amount: i128) {
+    RecallClosed {
+        recall_id,
+        merchant,
+        released_amount,
+    }
+    .publish(e);
+}
+
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct RefundDestinationSet {
+    pub refund_id: u32,
+    pub customer: Address,
+    pub destination: Address,
+}
+
+pub fn emit_refund_destination_set(e: &Env, refund_id: u32, customer: Address, destination: Address) {
+    RefundDestinationSet { refund_id, customer, destination }.publish(e);
+}
+
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct AlternateDestinationPolicySet {
+    pub merchant: Address,
+    pub allow: bool,
+}
+
+pub fn emit_alternate_destination_policy_set(e: &Env, merchant: Address, allow: bool) {
+    AlternateDestinationPolicySet { merchant, allow }.publish(e);
 }

@@ -610,6 +610,163 @@ fn test_refund_counter_increments() {
 }
 
 // ===========================================================================
+//  Additional Validation & State Transition Tests
+// ===========================================================================
+
+#[test]
+#[should_panic(expected = "DisputeWindowBelowMinimum")]
+fn test_initialize_dispute_window_below_minimum_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let payment_id = env.register(AhjoorPaymentsContract, ());
+    let refund_id = env.register(AhjoorRefundContract, ());
+    let refund_client = AhjoorRefundContractClient::new(&env, &refund_id);
+    let admin = Address::generate(&env);
+
+    // 60 seconds is below the 1-hour minimum
+    refund_client.initialize(&admin, &payment_id, &60u64, &None);
+}
+
+#[test]
+#[should_panic(expected = "Invalid reason code: must be 0-4")]
+fn test_request_refund_invalid_reason_code_panics() {
+    let s = setup();
+    let customer = Address::generate(&s.env);
+    let merchant = Address::generate(&s.env);
+
+    let pid = create_completed_payment(&s, &customer, &merchant, 500);
+    s.token_admin_client.mint(&customer, &100);
+    s.refund_client.request_refund(
+        &customer,
+        &pid,
+        &100,
+        &String::from_str(&s.env, "Bad code"),
+        &5u32,
+    );
+}
+
+#[test]
+#[should_panic(expected = "Refund amount must be positive")]
+fn test_request_refund_negative_amount_panics() {
+    let s = setup();
+    let customer = Address::generate(&s.env);
+    let merchant = Address::generate(&s.env);
+
+    let pid = create_completed_payment(&s, &customer, &merchant, 500);
+    s.refund_client.request_refund(
+        &customer,
+        &pid,
+        &-50,
+        &String::from_str(&s.env, "Negative"),
+        &0u32,
+    );
+}
+
+#[test]
+fn test_request_refund_records_merchant_and_reason_code() {
+    let s = setup();
+    let customer = Address::generate(&s.env);
+    let merchant = Address::generate(&s.env);
+
+    let pid = create_completed_payment(&s, &customer, &merchant, 500);
+    s.token_admin_client.mint(&customer, &100);
+    let refund_id = s.refund_client.request_refund(
+        &customer,
+        &pid,
+        &100,
+        &String::from_str(&s.env, "Duplicate charge"),
+        &2u32,
+    );
+
+    let refund = s.refund_client.get_refund(&refund_id);
+    assert_eq!(refund.merchant, merchant);
+    assert_eq!(refund.reason_code, 2);
+    assert_eq!(refund.token, s.token_addr);
+    assert!(refund.approved_at.is_none());
+    assert!(refund.processed_at.is_none());
+    assert!(refund.rejected_at.is_none());
+}
+
+#[test]
+fn test_reject_refund_sets_rejected_at() {
+    let s = setup();
+    let customer = Address::generate(&s.env);
+    let merchant = Address::generate(&s.env);
+
+    let pid = create_completed_payment(&s, &customer, &merchant, 500);
+    s.token_admin_client.mint(&customer, &250);
+    let refund_id = s.refund_client.request_refund(
+        &customer,
+        &pid,
+        &250,
+        &String::from_str(&s.env, "Item not received"),
+        &1u32,
+    );
+
+    s.refund_client.reject_refund(
+        &s.admin,
+        &refund_id,
+        &String::from_str(&s.env, "Delivered"),
+    );
+
+    let refund = s.refund_client.get_refund(&refund_id);
+    assert!(refund.rejected_at.is_some());
+    assert!(refund.approved_at.is_none());
+    assert!(refund.processed_at.is_none());
+}
+
+#[test]
+#[should_panic(expected = "Refund is not in requested status")]
+fn test_reject_already_approved_refund_panics() {
+    let s = setup();
+    let customer = Address::generate(&s.env);
+    let merchant = Address::generate(&s.env);
+
+    let pid = create_completed_payment(&s, &customer, &merchant, 500);
+    s.token_admin_client.mint(&customer, &250);
+    let refund_id = s.refund_client.request_refund(
+        &customer,
+        &pid,
+        &250,
+        &String::from_str(&s.env, "Item not received"),
+        &0u32,
+    );
+
+    s.refund_client.approve_refund(&s.admin, &refund_id);
+    s.refund_client.reject_refund(
+        &s.admin,
+        &refund_id,
+        &String::from_str(&s.env, "Too late"),
+    );
+}
+
+#[test]
+#[should_panic(expected = "Refund is not in a state that can be approved")]
+fn test_approve_rejected_refund_panics() {
+    let s = setup();
+    let customer = Address::generate(&s.env);
+    let merchant = Address::generate(&s.env);
+
+    let pid = create_completed_payment(&s, &customer, &merchant, 500);
+    s.token_admin_client.mint(&customer, &250);
+    let refund_id = s.refund_client.request_refund(
+        &customer,
+        &pid,
+        &250,
+        &String::from_str(&s.env, "Item not received"),
+        &0u32,
+    );
+
+    s.refund_client.reject_refund(
+        &s.admin,
+        &refund_id,
+        &String::from_str(&s.env, "Invalid reason"),
+    );
+    s.refund_client.approve_refund(&s.admin, &refund_id);
+}
+
+// ===========================================================================
 //  Upgrade / Migration Tests
 // ===========================================================================
 
